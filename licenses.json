@@ -1,0 +1,6 @@
+{
+  "licenses": [
+    { "code": "DEMO-CODE-0001", "active": true, "expires_at": null },
+    { "code": "DEMO-CODE-0002", "active": true, "expires_at": null }
+  ]
+}
