@@ -101,10 +101,9 @@ function createApp(pool, env) {
   app.post('/api/app',json,rl('app',20,3600e3,false),wrap(auth),perUser('app',12,3600e3),async(req,res)=>{const name=String(req.body.name||'');if(!/^[A-Za-z0-9_]{2,40}$/.test(name))return res.status(404).json({ok:false,error:'Приложение не найдено'});const r=await pool.query('SELECT tier,blob FROM apps WHERE name=$1',[name]);if(!r.rows.length)return res.status(404).json({ok:false,error:'Приложение не найдено'});const need=r.rows[0].tier,u=req.user,now=Date.now(),okPlus=Number(u.plus_exp)>now,okPrem=Number(u.premium_exp)>now;if(!(need==='PREMIUM'?(okPrem||okPlus):okPlus))return res.status(403).json({ok:false,error:'Нужна подписка '+(need==='PREMIUM'?'Premium':'Premium+')});const plain=decGcm(master,Buffer.from(r.rows[0].blob,'base64')),key=crypto.randomBytes(32),out=encGcm(key,plain);res.set({'Content-Type':'application/octet-stream','X-App-Key':key.toString('base64')});res.send(out);});
 
 
-  // Owner-only console. Secrets are SHA-256 digests in Render environment.
+  // Owner-only console. The access code is verified server-side.
   const consoleAccess=new Map();
   const consoleCodeHash=String(env.ADMIN_CONSOLE_CODE_SHA256||'').toLowerCase();
-  const dbPasswordHash=String(env.ADMIN_DB_PASSWORD_SHA256||'').toLowerCase();
   function validDigest(expected,supplied){return /^[a-f0-9]{64}$/.test(expected)&&safeEq(sha256(supplied),expected);}
   function checkOwner(req,res,next){
     if(req.user.nick!=='avamint')return res.status(403).json({ok:false,error:'Доступ только для AVAMINT'});
@@ -121,22 +120,17 @@ function createApp(pool, env) {
   app.post('/api/console/unlock',...consoleAuth,(req,res)=>{
     if(!validDigest(consoleCodeHash,String(req.body.code||'')))return res.status(403).json({ok:false,error:'Неверный код консоли'});
     const session=crypto.randomBytes(32).toString('hex');
-    consoleAccess.set(session,{nick:req.user.nick,device:req.device,exp:Date.now()+15*60*1000,db:false});
+    consoleAccess.set(session,{nick:req.user.nick,device:req.device,exp:Date.now()+15*60*1000});
     if(consoleAccess.size>500)for(const [k,v] of consoleAccess)if(v.exp<Date.now())consoleAccess.delete(k);
     res.json({ok:true,session});
   });
   const consoleRoute=[json,wrap(auth),checkOwner,consoleSession];
-  app.post('/api/console/db-unlock',...consoleRoute,rl('dbunlock',5,600000,true),(req,res)=>{
-    if(!validDigest(dbPasswordHash,String(req.body.password||'')))return res.status(403).json({ok:false,error:'Неверный пароль раздела'});
-    req.consoleEntry.db=true;res.json({ok:true});
-  });
-  function dbGate(req,res,next){if(!req.consoleEntry.db)return res.status(403).json({ok:false,error:'Раздел базы закрыт'});next();}
-  app.post('/api/console/users',...consoleRoute,dbGate,wrap(async(req,res)=>{
+  app.post('/api/console/users',...consoleRoute,wrap(async(req,res)=>{
     const search=String(req.body.search||'').trim().toLowerCase().slice(0,32);
     const r=await pool.query('SELECT u.nick,u.banned,e.premium_exp,e.plus_exp FROM users u LEFT JOIN entitlements e ON e.nick=u.nick WHERE u.nick LIKE $1 ORDER BY u.nick LIMIT 100',['%'+search+'%']);
     res.json({ok:true,users:r.rows});
   }));
-  app.post('/api/console/user',...consoleRoute,dbGate,wrap(async(req,res)=>{
+  app.post('/api/console/user',...consoleRoute,wrap(async(req,res)=>{
     const nick=String(req.body.nick||'').toLowerCase();
     if(!NICK.test(nick))return res.status(400).json({ok:false,error:'Неверный ник'});
     const r=await pool.query('SELECT u.nick,u.banned,u.created,e.premium_exp,e.plus_exp,(SELECT count(*)::int FROM devices d WHERE d.nick=u.nick) AS devices FROM users u LEFT JOIN entitlements e ON e.nick=u.nick WHERE u.nick=$1',[nick]);
@@ -155,13 +149,13 @@ function createApp(pool, env) {
     await pool.query(`UPDATE entitlements SET ${col}=$1,updated_at=NOW() WHERE nick=$2`,[value,nick]);
     res.json({ok:true,nick,tier,duration,expires:value});
   }));
-  app.post('/api/console/ban',...consoleRoute,dbGate,wrap(async(req,res)=>{
+  app.post('/api/console/ban',...consoleRoute,wrap(async(req,res)=>{
     const nick=String(req.body.nick||'').toLowerCase();
     if(!NICK.test(nick)||nick==='avamint')return res.status(400).json({ok:false,error:'Нельзя изменить этот аккаунт'});
     await pool.query('UPDATE users SET banned=$1 WHERE nick=$2',[req.body.banned===true?1:0,nick]);
     res.json({ok:true});
   }));
-  app.post('/api/console/reset-password',...consoleRoute,dbGate,wrap(async(req,res)=>{
+  app.post('/api/console/reset-password',...consoleRoute,wrap(async(req,res)=>{
     const nick=String(req.body.nick||'').toLowerCase(),password=String(req.body.password||'');
     if(!NICK.test(nick)||password.length<8||password.length>128)return res.status(400).json({ok:false,error:'Пароль: 8–128 символов'});
     const salt=crypto.randomBytes(16).toString('hex'),hash=await hashPw(password,salt);
