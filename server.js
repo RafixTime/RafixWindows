@@ -139,14 +139,21 @@ function createApp(pool, env) {
   }));
   app.post('/api/console/grant',...consoleRoute,rl('consolegrant',30,3600000,true),wrap(async(req,res)=>{
     const nick=String(req.body.nick||'').toLowerCase(),tier=String(req.body.tier||''),duration=String(req.body.duration||'');
-    if(!NICK.test(nick)||!['PREMIUM','PLUS'].includes(tier)||(!(duration in DUR)&&duration!=='NONE'))
+    if(!NICK.test(nick)||!['PREMIUM','PLUS','BOTH'].includes(tier)||(!(duration in DUR)&&duration!=='NONE')||(tier==='BOTH'&&duration!=='NONE'))
       return res.status(400).json({ok:false,error:'Неверные параметры'});
+    if(tier==='BOTH') {
+      const updated=await pool.query('UPDATE entitlements SET premium_exp=0,plus_exp=0,updated_at=NOW() WHERE nick=$1 RETURNING nick',[nick]);
+      if(!updated.rows.length)return res.status(404).json({ok:false,error:'Пользователь не найден'});
+      await pool.query('UPDATE users SET premium_exp=0,plus_exp=0 WHERE nick=$1',[nick]);
+      return res.json({ok:true,nick,tier,duration,expires:0});
+    }
     const col=tier==='PLUS'?'plus_exp':'premium_exp';
     const r=await pool.query('SELECT premium_exp,plus_exp FROM entitlements WHERE nick=$1',[nick]);
     if(!r.rows.length)return res.status(404).json({ok:false,error:'Пользователь не найден'});
     const current=Number(r.rows[0][col]||0);
     const value=duration==='NONE'?0:duration==='FOREVER'?FOREVER:Math.max(Date.now(),current)+DUR[duration];
     await pool.query(`UPDATE entitlements SET ${col}=$1,updated_at=NOW() WHERE nick=$2`,[value,nick]);
+    await pool.query(`UPDATE users SET ${col}=$1 WHERE nick=$2`,[value,nick]);
     res.json({ok:true,nick,tier,duration,expires:value});
   }));
   app.post('/api/console/ban',...consoleRoute,wrap(async(req,res)=>{
